@@ -9,13 +9,14 @@ from gymnasium import spaces
 from filterpy.kalman import ExtendedKalmanFilter
 
 from .configs import DroneConfig, BackdoorConfig
-from .relara import PureReLaRaAgent
+from .pbrs import PureReLaRaAgent
 
 
 class DroneNavigationEnv(gym.Env):
     """
-    Drone environment with pure ReLaRa backdoor poisoning.
+    Drone environment with pure PBRS backdoor poisoning. The agent uses only potential-based reward shaping. Its called PureReLaRaAgent as during development the name got stuck and to avoid confusion it was kept.
     No direct reward manipulation - all poisoning through learned potentials.
+    Main implementation of this thesis
     """
     metadata = {"render_modes": []}
     

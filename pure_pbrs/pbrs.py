@@ -12,7 +12,7 @@ from .configs import BackdoorConfig
 
 class PureReLaRaAgent:
     """
-    Pure ReLaRa implementation where backdoor poisoning happens ONLY through
+    Pure PBRS implementation where backdoor poisoning happens ONLY through
     learned potential functions, not through direct reward manipulation.
     This version includes fixes for the "cold start" and "conflicting optimizers" issues.
     """

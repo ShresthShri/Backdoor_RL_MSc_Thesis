@@ -8,7 +8,7 @@ import warnings
 from filterpy.kalman import ExtendedKalmanFilter
 
 from .configs import DroneConfig, BackdoorConfig
-from .relara import ReLaraRewardAgent
+from .pbrs import ReLaraRewardAgent
 
 
 class DroneNavigationEnv(gym.Env):
