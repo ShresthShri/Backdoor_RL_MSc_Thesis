@@ -1,0 +1,232 @@
+import os
+import json
+import argparse
+from datetime import datetime
+
+import numpy as np
+import torch
+from stable_baselines3 import SAC
+from stable_baselines3.common.monitor import Monitor
+from stable_baselines3.common.callbacks import CheckpointCallback
+from stable_baselines3.common.evaluation import evaluate_policy
+
+from pure_pbrs.configs import DroneConfig, BackdoorConfig
+from pure_pbrs.env import DroneNavigationEnv
+from pure_pbrs.callbacks import SleeperNetsBackdoorCallback, ReLaraTrainingCallback
+
+def parse_args():
+    p = argparse.ArgumentParser(description="Curriculum training for Pure PBRS backdoor pipeline")
+    p.add_argument("--save-dir", type=str, default="artifacts", help="Directory to save models and logs")
+    p.add_argument("--seed", type=int, default=42, help="Random seed")
+    p.add_argument("--load-stage2-model", type=str, default=None, help="Path to Stage 2 model to resume from")
+    p.add_argument("--stage1-steps", type=int, default=200_000)
+    p.add_argument("--stage2-steps", type=int, default=300_000)
+    p.add_argument("--stage3-steps", type=int, default=150_000)
+    return p.parse_args()
+
+def set_sac_learning_rate(model: SAC, lr: float):
+    for opt in [model.actor.optimizer, model.critic.optimizer]:
+        for g in opt.param_groups:
+            g["lr"] = lr
+    if getattr(model, "ent_coef_optimizer", None) is not None:
+        for g in model.ent_coef_optimizer.param_groups:
+            g["lr"] = lr
+
+def create_sac_model(env, learning_rate=3e-4, batch_size=256, seed=42) -> SAC:
+    return SAC(
+        "MlpPolicy",
+        env,
+        learning_rate=learning_rate,
+        buffer_size=100_000,
+        learning_starts=1_000,
+        batch_size=batch_size,
+        tau=0.005,
+        gamma=0.99,
+        train_freq=1,
+        gradient_steps=1,
+        ent_coef="auto",
+        target_update_interval=1,
+        target_entropy="auto",
+        use_sde=False,
+        policy_kwargs=dict(net_arch=[256, 256], activation_fn=torch.nn.ReLU),
+        verbose=1,
+        seed=seed,
+        device="auto",
+    )
+
+def attack_eval(model: SAC, mode="nfz_hover", episodes=5, spoof_on_step=30, no_pre=True):
+    env = DroneNavigationEnv(verbose=0)
+    env.configure_for_phase("testing")
+
+    relara_path = os.path.join(getattr(model, "load_path", "."), "relara_agent.pth")
+    if os.path.exists(relara_path):
+        env.relara_agent.load_state(relara_path)
+
+    env._eval_no_pretrigger_shaping = bool(no_pre)
+
+    successes, reassigns = 0, 0
+    for _ in range(episodes):
+        obs, _ = env.reset()
+        if hasattr(env, "disarm_attack"):
+            env.disarm_attack()
+        env.arm_attack(mode, spoof_on_step=spoof_on_step, force=True)
+        frozen = env.selected_attack_mode
+
+        done = False
+        while not done:
+            action, _ = model.predict(obs, deterministic=True)
+            obs, _, terminated, truncated, info = env.step(action)
+            done = terminated or truncated
+            if info.get("selected_attack_mode") not in (None, frozen):
+                reassigns += 1
+        successes += int(info.get("attack_success", False))
+
+    print(f"[{mode}] success_rate={successes/episodes:.2f}, reassign_events={reassigns}")
+
+def curriculum_training(save_dir="artifacts", seed=42, load_stage2_model=None,
+                        stage1_steps=200_000, stage2_steps=300_000, stage3_steps=150_000):
+    os.makedirs(save_dir, exist_ok=True)
+    for d in ["stage1_checkpoints", "stage2_checkpoints", "stage3_checkpoints"]:
+        os.makedirs(os.path.join(save_dir, d), exist_ok=True)
+
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+
+    drone_cfg = DroneConfig()
+    backdoor_cfg = BackdoorConfig()
+
+    base_env = DroneNavigationEnv(drone_cfg, backdoor_cfg, verbose=1)
+    env = Monitor(base_env)
+
+    if load_stage2_model:
+        print(f"Loading Stage 2 model from: {load_stage2_model}")
+        model = SAC.load(load_stage2_model, env=env)
+    else:
+        # Stage 1: basic navigation
+        print("Stage 1: Basic navigation training")
+        base_env.configure_for_phase("benign")
+        model = create_sac_model(env, learning_rate=3e-4, seed=seed)
+
+        ck1 = CheckpointCallback(
+            save_freq=20_000,
+            save_path=os.path.join(save_dir, "stage1_checkpoints"),
+            name_prefix="stage1",
+            save_replay_buffer=True,
+            save_vecnormalize=True,
+        )
+        model.learn(total_timesteps=stage1_steps, progress_bar=True, callback=ck1)
+
+        stage1_path = os.path.join(save_dir, "stage1_final")
+        model.save(stage1_path)
+        mean_reward, std_reward = evaluate_policy(model, env, n_eval_episodes=10)
+        print(f"Stage 1 performance: {mean_reward:.2f} ± {std_reward:.2f}")
+
+        # Stage 2: obstacles / harder benign
+        print("Stage 2: Navigation with obstacles")
+        base_env.configure_for_phase("benign_advanced")
+        set_sac_learning_rate(model, 2e-4)
+        ck2 = CheckpointCallback(
+            save_freq=20_000,
+            save_path=os.path.join(save_dir, "stage2_checkpoints"),
+            name_prefix="stage2",
+            save_replay_buffer=True,
+            save_vecnormalize=True,
+        )
+        model.learn(total_timesteps=stage2_steps, progress_bar=True, reset_num_timesteps=False, callback=ck2)
+
+        stage2_path = os.path.join(save_dir, "stage2_final")
+        model.save(stage2_path)
+        mean_reward, std_reward = evaluate_policy(model, env, n_eval_episodes=10)
+        print(f"Stage 2 performance: {mean_reward:.2f} ± {std_reward:.2f}")
+
+    # Stage 3: backdoor training
+    print("Stage 3: Backdoor training")
+    base_env.configure_for_phase("backdoor")
+    set_sac_learning_rate(model, 1e-4)
+
+    backdoor_cb = SleeperNetsBackdoorCallback(backdoor_cfg, verbose=1)
+    relara_cb = ReLaraTrainingCallback(train_freq=100, verbose=1)
+    ck3 = CheckpointCallback(
+        save_freq=10_000,
+        save_path=os.path.join(save_dir, "stage3_checkpoints"),
+        name_prefix="stage3",
+        save_replay_buffer=True,
+        save_vecnormalize=True,
+    )
+
+    model.learn(
+        total_timesteps=stage3_steps,
+        progress_bar=True,
+        reset_num_timesteps=False,
+        callback=[backdoor_cb, relara_cb, ck3],
+    )
+
+    final_path = os.path.join(save_dir, "final_backdoored_model")
+    model.save(final_path)
+    print(f"Final backdoored model saved to {final_path}")
+
+    if hasattr(base_env, "relara_agent"):
+        relara_path = os.path.join(save_dir, "relara_agent.pth")
+        base_env.relara_agent.save_state(relara_path)
+        print(f"ReLaRa agent saved to {relara_path}")
+
+    metadata = {
+        "timestamp": datetime.now().isoformat(),
+        "seed": seed,
+        "loaded_stage2_model": load_stage2_model,
+        "total_timesteps": {
+            "stage1": 0 if load_stage2_model else stage1_steps,
+            "stage2": 0 if load_stage2_model else stage2_steps,
+            "stage3": stage3_steps,
+        },
+        "repo_commit": os.environ.get("GIT_COMMIT", ""),
+        "sb3_version": getattr(torch, "__version__", ""),
+    }
+    with open(os.path.join(save_dir, "training_metadata.json"), "w") as f:
+        json.dump(metadata, f, indent=2)
+
+    return model, env
+
+def run_evaluation(model_dir: str, model_path: str | None = None):
+    model_path = model_path or os.path.join(model_dir, "final_backdoored_model")
+    env = DroneNavigationEnv(verbose=0)
+    relara_path = os.path.join(model_dir, "relara_agent.pth")
+    if hasattr(env, "relara_agent") and os.path.exists(relara_path):
+        env.relara_agent.load_state(relara_path)
+        print(f"Loaded ReLaRa agent from {relara_path}")
+    env.configure_for_phase("testing")
+
+    model = SAC.load(model_path, env=env)
+
+    print("Evaluating benign navigation...")
+    mean_reward, std_reward = evaluate_policy(model, env, n_eval_episodes=10, deterministic=True)
+    print(f"Benign performance: {mean_reward:.2f} ± {std_reward:.2f}")
+
+    results = {
+        "timestamp": datetime.now().isoformat(),
+        "model_path": model_path,
+        "benign_mean_reward": mean_reward,
+        "benign_std_reward": std_reward,
+    }
+    with open(os.path.join(model_dir, "evaluation_results.json"), "w") as f:
+        json.dump(results, f, indent=2)
+    return results
+
+if __name__ == "__main__":
+    args = parse_args()
+    print("Pure PBRS training pipeline")
+    print(f"Save directory: {args.save_dir}")
+    print(f"Seed: {args.seed}")
+    if args.load_stage2_model:
+        print(f"Resuming from Stage 2 model: {args.load_stage2_model}")
+
+    model, env = curriculum_training(
+        save_dir=args.save_dir,
+        seed=args.seed,
+        load_stage2_model=args.load_stage2_model,
+        stage1_steps=args.stage1_steps,
+        stage2_steps=args.stage2_steps,
+        stage3_steps=args.stage3_steps,
+    )
+    results = run_evaluation(args.save_dir)
+    print("Pipeline completed.")
