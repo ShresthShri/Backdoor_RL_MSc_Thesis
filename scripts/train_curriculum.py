@@ -1,6 +1,27 @@
+"""
+This script implements a 3-stage curriculum training pipeline for a reinforcement learning
+agent using the Stable Baselines3 library. The agent is trained to navigate a drone in a
+benign environment, then in a more challenging environment with obstacles, and finally to
+learn a backdoor attack using the Pure PBRS framework.
+
+Usage:
+Pure PBRS (default):
+    python scripts/train_curriculum.py --save-dir runs/pure --seed 123
+
+Single-network PBRS:
+    python scripts/train_curriculum.py --env-package single_pbrs --save-dir runs/single --seed 123
+
+Resume Stage 3 from a Stage 2 checkpoint:
+    python scripts/train_curriculum.py --env-package pure_pbrs --save-dir runs/pure_resume --load-stage2-model runs/pure/stage2_final.zip
+
+Adjust timesteps per stage:
+    python scripts/train_curriculum.py --save-dir runs/custom --stage1-steps 150000 --stage2-steps 250000 --stage3-steps 120000
+"""
+
 import os
 import json
 import argparse
+import importlib
 from datetime import datetime
 
 import numpy as np
@@ -13,6 +34,17 @@ from stable_baselines3.common.evaluation import evaluate_policy
 from pure_pbrs.configs import DroneConfig, BackdoorConfig
 from pure_pbrs.env import DroneNavigationEnv
 from pure_pbrs.callbacks import SleeperNetsBackdoorCallback, ReLaraTrainingCallback
+
+ENV_PKG = args.env_package  # "pure_pbrs" (default) or "single_pbrs"
+mod = importlib.import_module(f"{ENV_PKG}.env")
+cfg = importlib.import_module(f"{ENV_PKG}.configs")
+cbs = importlib.import_module(f"{ENV_PKG}.callbacks")
+
+DroneNavigationEnv = mod.DroneNavigationEnv
+DroneConfig = cfg.DroneConfig
+BackdoorConfig = cfg.BackdoorConfig
+SleeperNetsBackdoorCallback = cbs.SleeperNetsBackdoorCallback
+ReLaraTrainingCallback = cbs.ReLaraTrainingCallback
 
 def parse_args():
     p = argparse.ArgumentParser(description="Curriculum training for Pure PBRS backdoor pipeline")
