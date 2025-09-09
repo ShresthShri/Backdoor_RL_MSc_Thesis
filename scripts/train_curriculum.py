@@ -30,7 +30,7 @@ from stable_baselines3 import SAC
 from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.callbacks import CheckpointCallback
 from stable_baselines3.common.evaluation import evaluate_policy
-import stable_baselines3 as sb3_pkg  # for version string
+import stable_baselines3 as sb3_pkg  
 
 
 def parse_args():
