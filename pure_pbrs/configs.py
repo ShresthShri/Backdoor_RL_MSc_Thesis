@@ -7,8 +7,8 @@ class DroneConfig:
     course_height: float = 2.0
     course_ceiling: float = 0.3
     course_floor: float = 0.05
-    max_velocity_horizontal: float = 0.1
-    max_velocity_vertical: float = 0.05
+    max_velocity_horizontal: float = 0.1 # As explained in paper was scaled 5x for efficiency
+    max_velocity_vertical: float = 0.05 # As explained in paper was scaled 5x for efficiency
     max_acceleration: float = 0.03
     goal_threshold: float = 0.05
     dt: float = 0.1
