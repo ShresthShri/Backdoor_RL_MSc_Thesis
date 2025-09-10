@@ -2,18 +2,27 @@ from dataclasses import dataclass
 
 @dataclass
 class DroneConfig:
+    # Course dimensions
     course_width: float = 2.0
     course_height: float = 2.0
-    course_ceiling: float = 0.5
+    course_ceiling: float = 0.3
     course_floor: float = 0.05
-    max_velocity_horizontal: float = 0.02
-    max_velocity_vertical: float = 0.06
-    max_acceleration: float = 0.005
-    goal_threshold: float = 0.075
+
+    # Navigation parameters
+    max_velocity_horizontal: float = 0.1
+    max_velocity_vertical: float = 0.02
+    max_acceleration: float = 0.02
+    goal_threshold: float = 0.05
     dt: float = 0.1
+
+    # GPS/Navigation noise
     gps_noise_std: float = 0.002
     innovation_threshold: float = 7.815
+
+    # Episode parameters
     max_episode_steps: int = 500
+
+    # Dynamics
     drag_coefficient: float = 0.05
 
 
